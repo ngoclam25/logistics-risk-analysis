@@ -1,0 +1,152 @@
+---
+title: "Logistics Service Quality & Customer Risk Analysis"
+author: "Lâm Như Ngọc"
+date: "2026-05-24"
+output: html_document
+---
+
+## ĐỌC DATA
+
+```{r}
+library(tidyverse)
+library(lubridate) 
+library(janitor)
+library(scales)
+
+#choose.files()
+loads <- read_csv("C:\\Users\\Dell\\Downloads\\R\\project1\\loads.csv")%>% clean_names()
+trips <- read_csv("C:\\Users\\Dell\\Downloads\\R\\project1\\trips.csv")%>% clean_names()
+delivery_events <- read_csv("C:\\Users\\Dell\\Downloads\\R\\project1\\delivery_events.csv") %>% clean_names()
+routes <- read_csv("C:\\Users\\Dell\\Downloads\\R\\project1\\routes.csv")%>% clean_names()
+customers <- read_csv("C:\\Users\\Dell\\Downloads\\R\\project1\\customers.csv")%>% clean_names()
+
+```
+
+
+## Join bảng
+loads: load_id,customer_id,route_id  
+trips: trip_id, load_id  
+delivery_events: event_id, load_id, trip_id  
+customers: customer_id  
+routes: route_id
+
+```{r}
+logistics_master <- delivery_events %>%
+  filter(event_type == "Delivery") %>%
+  left_join(trips, by = c("trip_id", "load_id")) %>%  
+  left_join(loads, by = "load_id") %>% 
+  left_join(routes, by = "route_id") %>%
+  left_join(customers, by = "customer_id")
+```
+
+## TẠO BIẾN
+
+```{r}
+logistics_clean <- logistics_master %>%
+  mutate(
+    delay_minutes = as.numeric(difftime(actual_datetime, scheduled_datetime, units = "mins")),
+    is_late = if_else(delay_minutes > 15, 1, 0),
+    delay_severity = case_when(
+      delay_minutes <= 15 ~ "On Time",
+      delay_minutes <= 120 ~ "Minor Delay",
+      delay_minutes <= 360 ~ "Moderate Delay",
+      TRUE ~ "Severe Delay"),
+    detention_hours = detention_minutes / 60,  
+    rev_per_mile = if_else(
+      typical_distance_miles > 0,
+      revenue / typical_distance_miles,
+      NA_real_)
+  ) %>%
+  filter(delay_minutes >= -120 & delay_minutes <= 1440)
+
+
+glimpse(logistics_clean)
+summary(logistics_clean$delay_minutes)
+```
+
+
+## KPI Tổng quan (Executive KPI)
+
+```{r}
+
+executive_kpi <- logistics_clean %>%
+  summarise(
+    total_shipments = n_distinct(load_id),    #Shipment: 1 đơn hàng, có load_id duy nhất
+    #Nếu khách hàng A gửi 3 kiện hàng: có thể được gom thành 1 shipment (load_id = 101)
+    
+    total_customers = n_distinct(customer_id),#đếm số lượng giá trị khác nhau trong một cột, bỏ qua trùng lặp.
+    
+    total_revenue = sum(revenue, na.rm = TRUE),
+    on_time_rate = mean(is_late == 0, na.rm = TRUE),              #% shipment đúng giờ.
+    avg_delay_minutes = mean(delay_minutes, na.rm = TRUE),        #độ trễ trung bình.
+    avg_detention_hours = mean(detention_hours, na.rm = TRUE)
+  )
+executive_kpi
+```
+
+## Trend Service Quality
+```{r}
+
+monthly_quality <- logistics_clean %>%
+  mutate(month = floor_date(scheduled_datetime, "month")) %>%
+  group_by(month) %>%
+  summarise(
+    shipments = n(),
+    on_time_rate = mean(is_late == 0),
+    avg_delay_minutes = mean(delay_minutes),
+    .groups = "drop"
+  )
+```
+
+
+## Route Analysis
+```{r}
+route_risk <- logistics_clean %>%
+  group_by(origin_city, destination_city) %>%
+  summarise(
+    shipments = n(),
+    late_rate = mean(is_late),                 
+    avg_delay_minutes = mean(delay_minutes),
+    revenue = sum(revenue),
+    .groups = "drop"
+  ) %>%
+  filter(shipments >= 20) %>%
+  slice_max(late_rate, n = 10)
+```
+
+## Customer Risk Analysis  
+
+```{r}
+customer_risk <- logistics_clean %>%
+  group_by(customer_id, customer_name) %>%
+  
+  summarise(
+    shipments = n(),
+    revenue = sum(revenue, na.rm = TRUE),
+    late_rate = mean(is_late),
+    avg_delay_minutes = mean(delay_minutes),
+    severe_delay_rate = mean(delay_severity == "Severe Delay"),
+    avg_detention_hours = mean(detention_hours),
+    .groups = "drop") %>%
+  
+  mutate(
+    risk_score = 0.40*percent_rank(late_rate) +
+                 0.30*percent_rank(severe_delay_rate) +
+                 0.20*percent_rank(avg_detention_hours) +
+                 0.10*percent_rank(revenue),
+    risk_segment = case_when(
+      risk_score >= 0.75 ~ "High Risk",
+      risk_score >= 0.40 ~ "Medium Risk",
+      TRUE ~ "Low Risk")
+  )
+```
+
+```{r}
+write_csv(logistics_clean, "logistics_clean_for_tableau.csv")
+write_csv(executive_kpi, "executive_kpi.csv") 
+write_csv(monthly_quality, "monthly_quality.csv")
+write_csv(customer_risk, "customer_risk.csv")
+write_csv(route_risk, "route_risk.csv")
+
+```
+
